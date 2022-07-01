@@ -14,3 +14,5 @@ require (
 )
 
 require github.com/mattn/go-runewidth v0.0.9 // indirect
+
+replace github.com/segmentio/parquet-go => ./

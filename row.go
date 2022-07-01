@@ -400,6 +400,7 @@ func deconstructFuncOfOptional(columnIndex int16, node Node) (int16, deconstruct
 func deconstructFuncOfRepeated(columnIndex int16, node Node) (int16, deconstructFunc) {
 	columnIndex, deconstruct := deconstructFuncOf(columnIndex, Required(node))
 	return columnIndex, func(row Row, levels levels, value reflect.Value) Row {
+		value = dereferenceValue(value)
 		if !value.IsValid() || value.Len() == 0 {
 			return deconstruct(row, levels, reflect.Value{})
 		}
@@ -492,6 +493,7 @@ func deconstructFuncOfLeaf(columnIndex int16, node Node) (int16, deconstructFunc
 		v := Value{}
 
 		if value.IsValid() {
+			value = dereferenceValue(value)
 			v = makeValue(kind, value)
 		}
 
@@ -554,28 +556,32 @@ func reconstructFuncOfRepeated(columnIndex int16, node Node) (int16, reconstruct
 	nextColumnIndex, reconstruct := reconstructFuncOf(columnIndex, Required(node))
 	rowLength := nextColumnIndex - columnIndex
 	return nextColumnIndex, func(value reflect.Value, lvls levels, row Row) (Row, error) {
-		t := value.Type()
-		c := value.Cap()
+		t := dereferenceValue(value).Type()
+		c := dereferenceValue(value).Cap()
 		n := 0
 		if c > 0 {
-			value.Set(value.Slice(0, c))
+			value.Set(dereferenceValue(value).Slice(0, c))
 		} else {
 			c = 10
 			value.Set(reflect.MakeSlice(t, c, c))
 		}
 
 		defer func() {
-			value.Set(value.Slice(0, n))
+			if n == 0 && value.Kind() == reflect.Interface {
+				value.Set(reflect.Zero(value.Type()))
+			} else {
+				value.Set(dereferenceValue(value).Slice(0, n))
+			}
 		}()
 
 		return reconstructRepeated(columnIndex, rowLength, lvls, row, func(levels levels, row Row) (Row, error) {
 			if n == c {
 				c *= 2
 				newValue := reflect.MakeSlice(t, c, c)
-				reflect.Copy(newValue, value)
+				reflect.Copy(newValue, dereferenceValue(value))
 				value.Set(newValue)
 			}
-			row, err := reconstruct(value.Index(n), levels, row)
+			row, err := reconstruct(dereferenceValue(value).Index(n), levels, row)
 			n++
 			return row, err
 		})

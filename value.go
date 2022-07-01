@@ -611,7 +611,7 @@ func assignValue(dst reflect.Value, src Value) error {
 		}
 
 	case Int32:
-		v := int64(src.Int32())
+		v := src.Int32()
 		switch dstKind {
 		case reflect.Int8, reflect.Int16, reflect.Int32:
 			dst.SetInt(int64(v))
@@ -619,9 +619,12 @@ func assignValue(dst reflect.Value, src Value) error {
 		case reflect.Uint8, reflect.Uint16, reflect.Uint32:
 			dst.SetUint(uint64(v))
 			return nil
-		default:
-			val = reflect.ValueOf(v)
+		case reflect.Interface:
+			if assignInterfaceInt32(dst, v) {
+				return nil
+			}
 		}
+		val = reflect.ValueOf(v)
 
 	case Int64:
 		v := src.Int64()
@@ -632,9 +635,12 @@ func assignValue(dst reflect.Value, src Value) error {
 		case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uint, reflect.Uintptr:
 			dst.SetUint(uint64(v))
 			return nil
-		default:
-			val = reflect.ValueOf(v)
+		case reflect.Interface:
+			if assignInterfaceInt64(dst, v) {
+				return nil
+			}
 		}
+		val = reflect.ValueOf(v)
 
 	case Int96:
 		val = reflect.ValueOf(src.Int96())
@@ -670,9 +676,12 @@ func assignValue(dst reflect.Value, src Value) error {
 				dst.SetBytes(copyBytes(v))
 				return nil
 			}
-		default:
-			val = reflect.ValueOf(v)
+		case reflect.Interface:
+			if assignInterfaceBytes(dst, v) {
+				return nil
+			}
 		}
+		val = reflect.ValueOf(v)
 
 	case FixedLenByteArray:
 		v := src.ByteArray()
@@ -694,6 +703,10 @@ func assignValue(dst reflect.Value, src Value) error {
 				dst.SetBytes(copyBytes(v))
 				return nil
 			}
+		case reflect.Interface:
+			if assignInterfaceBytes(dst, v) {
+				return nil
+			}
 		default:
 			val = reflect.ValueOf(v)
 		}
@@ -705,6 +718,68 @@ func assignValue(dst reflect.Value, src Value) error {
 	}
 
 	return fmt.Errorf("cannot assign parquet value of type %s to go value of type %s", srcKind.String(), dst.Type())
+}
+
+func assignInterfaceInt32(dst reflect.Value, src int32) bool {
+	var srcValue interface{}
+	switch dst.Elem().Kind() {
+	case reflect.Int8:
+		srcValue = int8(src)
+	case reflect.Int16:
+		srcValue = int16(src)
+	case reflect.Int32:
+		srcValue = int32(src)
+	case reflect.Uint8:
+		srcValue = uint8(src)
+	case reflect.Uint16:
+		srcValue = uint16(src)
+	case reflect.Uint32:
+		srcValue = uint32(src)
+	default:
+		return false
+	}
+	dst.Set(reflect.ValueOf(srcValue))
+	return true
+}
+
+func assignInterfaceInt64(dst reflect.Value, src int64) bool {
+	var srcValue interface{}
+	switch dst.Elem().Kind() {
+	case reflect.Int64:
+		srcValue = int64(src)
+	case reflect.Uint64:
+		srcValue = uint64(src)
+	case reflect.Int:
+		srcValue = int(src)
+	case reflect.Uint:
+		srcValue = uint(src)
+	case reflect.Uintptr:
+		srcValue = uintptr(src)
+	default:
+		return false
+	}
+	dst.Set(reflect.ValueOf(srcValue))
+	return true
+}
+
+func assignInterfaceBytes(dst reflect.Value, src []byte) bool {
+	var srcValue interface{}
+	switch dst.Elem().Kind() {
+	case reflect.String:
+		srcValue = string(src)
+	case reflect.Array:
+		dst := dst.Elem()
+		if dst.Len() != len(src) {
+			return false
+		}
+		a := reflect.New(dst.Type()).Elem()
+		reflect.Copy(a, reflect.ValueOf(src))
+		srcValue = a.Interface()
+	default:
+		return false
+	}
+	dst.Set(reflect.ValueOf(srcValue))
+	return true
 }
 
 func parseValue(kind Kind, data []byte) (val Value, err error) {

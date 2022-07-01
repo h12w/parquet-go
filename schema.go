@@ -129,6 +129,13 @@ func dereference(t reflect.Type) reflect.Type {
 	return t
 }
 
+func dereferenceValue(v reflect.Value) reflect.Value {
+	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		v = v.Elem()
+	}
+	return v
+}
+
 func makeDeconstructFunc(node Node) (deconstruct deconstructFunc) {
 	if schema, _ := node.(*Schema); schema != nil {
 		return schema.deconstruct
@@ -291,25 +298,52 @@ type structNode struct {
 	fields []structField
 }
 
-func structNodeOf(t reflect.Type) *structNode {
+func structNodeOfValue(v reflect.Value) *structNode {
 	// Collect struct fields first so we can order them before generating the
 	// column indexes.
-	fields := structFieldsOf(t)
+	fields := structFieldsOfValue(v)
 
 	s := &structNode{
-		gotype: t,
+		gotype: v.Type(),
 		fields: make([]structField, len(fields)),
 	}
 
 	for i := range fields {
-		s.fields[i] = makeStructField(fields[i])
+
+		s.fields[i] = makeStructField(fields[i].validValue(), fields[i].StructField)
 	}
 
 	return s
 }
 
-func structFieldsOf(t reflect.Type) []reflect.StructField {
-	fields := appendStructFields(t, nil, nil, 0)
+// goFieldValue wrapps both a Go struct Field type and its value
+type goFieldValue struct {
+	Value reflect.Value
+	reflect.StructField
+}
+
+// validValue returns the value if it's valid or create a new one from its type
+func (v goFieldValue) validValue() reflect.Value {
+	var fieldValue reflect.Value
+	if v.Value.IsValid() {
+		fieldValue = v.Value
+	} else {
+		fieldValue = newValue(v.Type)
+	}
+	return fieldValue
+}
+
+func structFieldsOf(v reflect.Type) []reflect.StructField {
+	fieldValues := structFieldsOfValue(newValue(v))
+	fields := make([]reflect.StructField, len(fieldValues))
+	for i, f := range fieldValues {
+		fields[i] = f.StructField
+	}
+	return fields
+}
+
+func structFieldsOfValue(v reflect.Value) []goFieldValue {
+	fields := appendStructFields(v, nil, nil, 0)
 
 	for i := range fields {
 		f := &fields[i]
@@ -325,7 +359,8 @@ func structFieldsOf(t reflect.Type) []reflect.StructField {
 	return fields
 }
 
-func appendStructFields(t reflect.Type, fields []reflect.StructField, index []int, offset uintptr) []reflect.StructField {
+func appendStructFields(v reflect.Value, fields []goFieldValue, index []int, offset uintptr) []goFieldValue {
+	t := v.Type()
 	for i, n := 0, t.NumField(); i < n; i++ {
 		f := t.Field(i)
 		if tag := f.Tag.Get("parquet"); tag != "" {
@@ -341,10 +376,10 @@ func appendStructFields(t reflect.Type, fields []reflect.StructField, index []in
 		f.Offset += offset
 
 		if f.Anonymous {
-			fields = appendStructFields(f.Type, fields, fieldIndex, f.Offset)
+			fields = appendStructFields(v.Field(i), fields, fieldIndex, f.Offset)
 		} else if f.IsExported() {
 			f.Index = fieldIndex
-			fields = append(fields, f)
+			fields = append(fields, goFieldValue{Value: v.Field(i), StructField: f})
 		}
 	}
 	return fields
@@ -429,7 +464,7 @@ func throwInvalidStructField(msg string, field reflect.StructField) {
 	panic(msg + ": " + structFieldString(field))
 }
 
-func makeStructField(f reflect.StructField) structField {
+func makeStructField(v reflect.Value, f reflect.StructField) structField {
 	var (
 		field      = structField{name: f.Name, index: f.Index}
 		optional   bool
@@ -535,7 +570,7 @@ func makeStructField(f reflect.StructField) structField {
 		case "list":
 			switch t.Kind() {
 			case reflect.Slice:
-				element := nodeOf(t.Elem())
+				element := nodeOfValue(sliceElement(v))
 				setNode(element)
 				setList()
 			default:
@@ -602,7 +637,7 @@ func makeStructField(f reflect.StructField) structField {
 	})
 
 	if field.Node == nil {
-		field.Node = nodeOf(f.Type)
+		field.Node = nodeOfValue(v)
 	}
 
 	if compressed != nil {
@@ -622,6 +657,21 @@ func makeStructField(f reflect.StructField) structField {
 	}
 
 	return field
+}
+
+// sliceElement returns the slice's first element value if it's valid or
+// creates a new one from its element type
+func sliceElement(v reflect.Value) reflect.Value {
+	if v.Len() == 0 {
+		return newValue(v.Type().Elem())
+	}
+	return v.Index(0)
+}
+
+// newValue creates a new value in its original type
+// instead of the pointer type
+func newValue(t reflect.Type) reflect.Value {
+	return reflect.New(t).Elem()
 }
 
 // FixedLenByteArray decimals are sized based on precision
@@ -647,6 +697,18 @@ func forEachStructTagOption(sf reflect.StructField, do func(t reflect.Type, opti
 }
 
 func nodeOf(t reflect.Type) Node {
+	return nodeOfValue(newValue(t))
+}
+
+func nodeOfValue(v reflect.Value) Node {
+	if v.IsValid() && v.CanInterface() {
+		noder, ok := v.Interface().(Noder)
+		if ok {
+			return noder.Node()
+		}
+	}
+
+	t := v.Type()
 	switch t {
 	case reflect.TypeOf(deprecated.Int96{}):
 		return Leaf(Int96Type)
@@ -681,25 +743,42 @@ func nodeOf(t reflect.Type) Node {
 		n = String()
 
 	case reflect.Ptr:
-		n = Optional(nodeOf(t.Elem()))
+		var elem reflect.Value
+		if v.IsNil() {
+			elem = newValue(t.Elem())
+		} else {
+			elem = v.Elem()
+		}
+		n = Optional(nodeOfValue(elem))
 
 	case reflect.Slice:
 		if elem := t.Elem(); elem.Kind() == reflect.Uint8 { // []byte?
 			n = Leaf(ByteArrayType)
 		} else {
-			n = Repeated(nodeOf(elem))
+			n = Repeated(nodeOfValue(sliceElement(v)))
 		}
 
 	case reflect.Array:
 		if t.Elem().Kind() == reflect.Uint8 {
 			n = Leaf(FixedLenByteArrayType(t.Len()))
+		} else {
+			n = Repeated(nodeOfValue(sliceElement(v)))
 		}
 
 	case reflect.Map:
-		n = Map(nodeOf(t.Key()), nodeOf(t.Elem()))
+		var key, value reflect.Value
+		if v.Len() == 0 {
+			key, value = newValue(t.Key()), newValue(t.Elem())
+		} else {
+			r := v.MapRange()
+			if r.Next() {
+				key, value = r.Key(), r.Value()
+			}
+		}
+		n = Map(nodeOfValue(key), nodeOfValue(value))
 
 	case reflect.Struct:
-		return structNodeOf(t)
+		return structNodeOfValue(v)
 	}
 
 	if n == nil {

@@ -147,7 +147,12 @@ func (n *compressedNode) Compression() compress.Codec {
 }
 
 // Optional wraps the given node to make it optional.
-func Optional(node Node) Node { return &optionalNode{node} }
+func Optional(node Node) Node {
+	if node.Optional() || node.Repeated() {
+		return node
+	}
+	return &optionalNode{node}
+}
 
 type optionalNode struct{ Node }
 

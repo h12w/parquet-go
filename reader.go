@@ -184,9 +184,9 @@ func (r *Reader) Reset() {
 //
 // The method returns io.EOF when no more rows can be read from r.
 func (r *Reader) Read(row interface{}) error {
-	if rowType := dereference(reflect.TypeOf(row)); rowType.Kind() == reflect.Struct {
-		if r.seen != rowType {
-			if err := r.updateReadSchema(rowType); err != nil {
+	if rowValue := dereferenceValue(reflect.ValueOf(row)); rowValue.Kind() == reflect.Struct {
+		if r.seen != rowValue.Type() {
+			if err := r.updateReadSchema(rowValue); err != nil {
 				return fmt.Errorf("cannot read parquet row into go value of type %T: %w", row, err)
 			}
 		}
@@ -214,8 +214,8 @@ func (r *Reader) Read(row interface{}) error {
 	return r.read.schema.Reconstruct(row, r.rowbuf[0])
 }
 
-func (r *Reader) updateReadSchema(rowType reflect.Type) error {
-	schema := schemaOf(rowType)
+func (r *Reader) updateReadSchema(rowValue reflect.Value) error {
+	schema := NewSchema("", nodeOfValue(rowValue))
 
 	if nodesAreEqual(schema, r.file.schema) {
 		r.read.init(schema, r.file.rowGroup)
@@ -227,7 +227,7 @@ func (r *Reader) updateReadSchema(rowType reflect.Type) error {
 		r.read.init(schema, ConvertRowGroup(r.file.rowGroup, conv))
 	}
 
-	r.seen = rowType
+	r.seen = rowValue.Type()
 	return nil
 }
 
